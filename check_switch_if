@@ -5,9 +5,11 @@
 # check_switch_if: Checks a network interface (typically on a switch)
 # for their ifOperStatus and error counters.
 #
+# The latest version of this script can be downloaded at:
+# https://github.com/ohitz/check_switch_if
+#
 # Inspired by check_snmp_int.pl available at
 # http://nagios.manubulon.com.
-#
 
 use strict;
 use Net::SNMP;
