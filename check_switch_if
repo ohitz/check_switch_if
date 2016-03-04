@@ -17,7 +17,7 @@ use Getopt::Long;
 use Scalar::Util qw(looks_like_number);
 
 # Directory where the values of the previous run are stored.
-my $opt_statedir = "/var/run/check_switch_if";
+my $opt_statedir = "/var/run/nagios3/check_switch_if";
 
 # Nagios return values.
 my %ERRORS = ( OK => 0,

@@ -14,7 +14,7 @@ CRITICAL. Furthermore, the errors/min rate since the last invocation
 of the check is calculated and WARNING or CRITICAL is reported if the
 rate exceeds the configured limits.
 
-At each invocation, the error counter is stored to disk. This state
-doesn't have to survive a reset, by default it is stored in the
-/var/run/check_switch_if/ directory. If the state cannot be read, no
+At each invocation, the error counter is stored to disk. This state doesn't
+have to survive a reset, by default it is stored in the
+/var/run/nagios3/check_switch_if/ directory. If the state cannot be read, no
 error rate calculation is done.
