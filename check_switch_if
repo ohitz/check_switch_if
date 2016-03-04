@@ -1,0 +1,426 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2008-2016 Oliver Hitz <oliver@net-track.ch>
+#
+# check_switch_if: Checks a network interface (typically on a switch)
+# for their ifOperStatus and error counters.
+#
+# Inspired by check_snmp_int.pl available at
+# http://nagios.manubulon.com.
+#
+
+use strict;
+use Net::SNMP;
+use Getopt::Long;
+
+# Directory where the values of the previous run are stored.
+my $opt_statedir = "/var/run/check_switch_if";
+
+# Nagios return values.
+my %ERRORS = ( OK => 0,
+	       WARNING => 1,
+	       CRITICAL => 2,
+	       UNKNOWN => 3 );
+
+# Parse and check arguments.
+my $opt_help = undef;
+my $opt_verbose = undef;
+my $opt_hostname = undef;
+my $opt_community = undef;
+my $opt_snmp_version = undef;
+my $opt_port = 161;
+my $opt_timeout = 15;
+my $opt_ifdescr = undef;
+my $opt_ifalias = undef;
+my $opt_errlevels_ = undef;
+
+my @opt_errlevels = ( 5, 10 );
+
+Getopt::Long::Configure ("bundling");
+GetOptions("h"   => \$opt_help,         "help"          => \$opt_help,
+	   "V"   => \$opt_verbose,      "verbose"       => \$opt_verbose,
+	   "v:i" => \$opt_snmp_version, "snmp-version"  => \$opt_snmp_version,
+           "H:s" => \$opt_hostname,     "hostname:s"    => \$opt_hostname,
+	   "C:s" => \$opt_community,    "community:s"   => \$opt_community,
+           "D:s" => \$opt_statedir,     "statedir:s"    => \$opt_statedir,
+           "p:i" => \$opt_port,         "port:i"        => \$opt_port,
+	   "t:i" => \$opt_timeout,      "timeout:i"     => \$opt_timeout,
+	   "d:s" => \$opt_ifdescr,      "descr:s"       => \$opt_ifdescr,
+	   "a:s" => \$opt_ifalias,      "alias:s"       => \$opt_ifalias,
+	   "e:s" => \$opt_errlevels_,   "errorlevels:s" => \$opt_errlevels_);
+
+if (defined($opt_help)) {
+  usage();
+  exit $ERRORS{UNKNOWN};
+}
+
+if (!defined($opt_hostname)) {
+  print "ERROR: No hostname specified.\n\n";
+  usage();
+  exit $ERRORS{UNKNOWN};
+}
+if (!defined($opt_community)) {
+  print "ERROR: No SNMP community specified.\n\n";
+  usage();
+  exit $ERRORS{UNKNOWN};
+}
+if (!defined($opt_ifdescr) && !defined($opt_ifalias)) {
+  print "ERROR: No interface regexp specified (-d and/or -a).\n\n";
+  usage();
+  exit $ERRORS{UNKNOWN};
+}
+
+if (defined($opt_errlevels_)) {
+  @opt_errlevels = split(/,/, $opt_errlevels_);
+}
+
+# Create SNMP session.
+my $session;
+my $error;
+
+($session, $error) = Net::SNMP->session(-hostname  => $opt_hostname,
+					-version   => $opt_snmp_version,
+					-community => $opt_community,
+					-port      => $opt_port,
+					-timeout   => $opt_timeout);
+
+if (!defined($session)) {
+  printf("ERROR opening session: %s.\n", $error);
+  exit $ERRORS{"UNKNOWN"};
+}
+
+my $OPERSTATUS = {
+  1 => "up",
+  2 => "down",
+  3 => "testing",
+  4 => "unknown",
+  5 => "dormant",
+  6 => "notPresent",
+  7 => "lowerLayerDown"
+};
+
+my $NAME_OIDS = {
+  ifDescr                            => "1.3.6.1.2.1.2.2.1.2",
+  ifAlias                            => "1.3.6.1.2.1.31.1.1.1.18",
+};
+
+my $STATUS_OIDS = {
+  ifOperStatus                       => "1.3.6.1.2.1.2.2.1.8",
+};
+
+my $ERROR_OIDS = {
+  dot3StatsAlignmentErrors           => "1.3.6.1.2.1.10.7.2.1.2",
+  dot3StatsFCSErrors                 => "1.3.6.1.2.1.10.7.2.1.3",
+  dot3StatsSingleCollisionFrames     => "1.3.6.1.2.1.10.7.2.1.4",
+  dot3StatsMultipleCollisionFrames   => "1.3.6.1.2.1.10.7.2.1.5",
+  dot3StatsSQETestErrors             => "1.3.6.1.2.1.10.7.2.1.6",
+  dot3StatsDeferredTransmissions     => "1.3.6.1.2.1.10.7.2.1.7",
+  dot3StatsLateCollisions            => "1.3.6.1.2.1.10.7.2.1.8",
+  dot3StatsExcessiveCollisions       => "1.3.6.1.2.1.10.7.2.1.9",
+  dot3StatsInternalMacTransmitErrors => "1.3.6.1.2.1.10.7.2.1.10",
+  dot3StatsCarrierSenseErrors        => "1.3.6.1.2.1.10.7.2.1.11",
+  dot3StatsFrameTooLongs             => "1.3.6.1.2.1.10.7.2.1.12",
+  dot3StatsInternalMacReceiveErrors  => "1.3.6.1.2.1.10.7.2.1.16",
+};
+
+# Load ifDescr and ifAlias tables.
+my $name_entries = $session->get_entries(-columns => [ $NAME_OIDS->{ifDescr},
+                                                       $NAME_OIDS->{ifAlias} ]);
+
+# Find all matching interfaces and construct names.
+my @if_indexes = ();
+my $ifdescr_idx = {};
+my $ifalias_idx = {};
+
+my $re_ifdescr = "^" . quotemeta($NAME_OIDS->{ifDescr}) . "\\.(\\d+)\$";
+my $re_ifalias = "^" . quotemeta($NAME_OIDS->{ifAlias}) . "\\.(\\d+)\$";
+
+foreach my $key (keys %{ $name_entries }) {
+  if ($key =~ qr/$re_ifdescr/) {
+    my $index = $1;
+    $ifdescr_idx->{$index} = $name_entries->{$key};    
+    if ($opt_ifdescr) {
+      if ($name_entries->{$key} =~ qr/$opt_ifdescr/) {
+        push @if_indexes, int $index;
+      }
+    }
+  } elsif ($key =~ qr/$re_ifalias/) {
+    my $index = $1;
+    $ifalias_idx->{$index} = $name_entries->{$key};    
+    if ($opt_ifalias) {
+      if ($name_entries->{$key} =~ qr/$opt_ifalias/) {
+        push @if_indexes, int $index;
+      }
+    }
+  }
+}
+
+# Results.
+my @oks;
+my @criticals;
+my @warnings;
+my @unknowns;
+
+@if_indexes = sort { $a <=> $b } @if_indexes;
+
+# Check status and error counters for each interface.
+my $if_state = { };
+
+my $if_up_count = 0;
+my $if_nok_err_count = 0;
+
+my %check_entries;
+
+foreach my $if_index (@if_indexes) {
+  my $if_name = $ifdescr_idx->{$if_index};
+  if (defined $ifalias_idx->{$if_index}) {
+    $if_name .= " (".$ifalias_idx->{$if_index}.")";
+  }
+
+  # Create list of OIDs to fetch.
+  my @oids;
+  push @oids, map { $STATUS_OIDS->{$_}.".".$if_index } keys %{ $STATUS_OIDS };
+  push @oids, map { $ERROR_OIDS->{$_}.".".$if_index } keys %{ $ERROR_OIDS };
+
+  my $values;
+  
+  if (!($values = $session->get_request( -varbindlist => \@oids ))) {
+    push @unknowns, "$if_name is UNKNOWN";
+    next;
+  }
+
+  $if_state->{$if_index} = {};
+
+  # Interface status.
+  my $oid = $STATUS_OIDS->{ifOperStatus}.".".$if_index;
+  if (defined $values->{$oid}) {
+    $if_state->{$if_index}->{status} = $values->{$oid};
+  }
+
+  # Interface errors.
+  foreach $oid (values %{ $ERROR_OIDS }) {
+    if (defined $values->{$oid.".".$if_index}) {
+      if (!defined $if_state->{$if_index}->{errors}) {
+        $if_state->{$if_index}->{errors} = 0;
+      }
+      $if_state->{$if_index}->{errors} += $values->{$oid.".".$if_index};
+    }
+  }
+
+  # Check if status is known.
+  if (!defined $if_state->{$if_index}->{status}) {
+    push @unknowns, "$if_name interface status is UNKNOWN";
+    next;
+  }
+
+  # Check if errors are known.
+  if (!defined $if_state->{$if_index}->{errors}) {
+    push @unknowns, "$if_name interface errors are UNKNOWN";
+    next;
+  }
+
+  # Check if status is anything other than up.
+  if ($if_state->{$if_index}->{status} != 1) {
+    push @criticals, "$if_name interface status is ".$OPERSTATUS->{$if_state->{$if_index}->{status}};
+    next;
+  }
+
+  $if_up_count++;
+
+  my $now = time();
+  
+  # Load old state.
+  my $old_state = load_state($ifdescr_idx->{$if_index});
+  save_state($ifdescr_idx->{$if_index}, $now, $if_state->{$if_index}->{errors});
+
+  if ($old_state) {
+    my $elapsed_time = $now - $old_state->{time};
+    if ($elapsed_time <= 0){
+      # Is the time running backwards?
+      verbose("Time is running backwards! Cannot check error rate.\n");
+      return;
+    }
+
+    verbose("%d s elapsed since last check.\n", $elapsed_time);
+
+    my $errors_rate = 0;
+
+    if ($if_state->{$if_index}->{errors} > $old_state->{errors}) {
+      $errors_rate = int(($if_state->{$if_index}->{errors} - $old_state->{errors}) / ($elapsed_time / 60.0));
+      verbose("%s: %d errors/min", $if_name, $errors_rate);
+
+      if ($errors_rate > $opt_errlevels[1]) {
+        push @criticals, "$if_name $errors_rate errors/min";
+        $if_nok_err_count++;
+        next;
+      } elsif ($errors_rate > $opt_errlevels[0]) {
+        push @warnings, "$if_name $errors_rate errors/min";
+        $if_nok_err_count++;
+        next;
+      }
+    }
+
+    push @oks, "$if_name is up, $errors_rate errors/min";
+    next;
+  } else {
+    verbose("Cannot load previous errors count of $if_name.\n");
+  }
+
+  push @oks, "$if_name is up, unknown errors/min";
+}
+
+# Report summary.
+my $status = "OK";
+my $detail;
+
+if (scalar @if_indexes == 0) {
+  $status = "UNKNOWN";
+  $detail = "0 interfaces checked";
+} else {
+  $detail = $if_up_count." of ".(scalar @if_indexes)." interfaces up";
+  if ($if_nok_err_count == 0) {
+    $detail .= ", no errors";
+  } else {
+    $detail .= ", ".$if_nok_err_count." interfaces with errors";
+  }
+}
+
+if (@criticals) {
+  $status = "CRITICAL";
+}
+if (@warnings) {
+  $status = "WARNING";
+}
+if (@unknowns) {
+  $status = "UNKNOWN";
+}
+
+print "$status: $detail\n";
+print join "\n", (@criticals, @warnings, @unknowns, @oks);
+print "\n";
+
+exit $ERRORS{$status};
+
+sub usage
+{
+  print <<__USAGE__
+Usage: $0 [options]
+
+This monitoring plugin scans all interfaces on the destination host and
+checks all interfaces matching a given ifDescr and/or ifAlias value for
+their status and errors rate.
+
+If any of the matched interfaces is not up, the check returns CRITICAL.
+Furthermore, the errors/min rate since the last invocation of this check
+is calculated and WARNING or CRITICAL is reported if the rate exceeds
+the configured limits.
+
+Options:
+
+-V, --verbose
+  Verbose output
+
+-H HOST, --hostname=HOST
+  Name or IP address of the host to check
+
+-C COMMUNITY, --community=COMMUNITY
+  SNMP community
+
+-v VERSION, --snmp-version=VERSION
+  SNMP version (1 or 2, default: 2)
+
+-p PORT, --port=PORT
+  SNMP port (default: 161)
+
+-t TIMEOUT, --timeout=TIMEOUT
+  SNMP timeout in seconds (default: 30)
+
+-e WARN,CRITICAL, --errorlevels=WARN,CRITICAL
+  Set warning and critical levels for errors/min (default 5,10)
+
+-D DIRECTORY
+  Directory where the last known error counters are stored.
+  Defaults to /var/run/check_switch_if/
+
+-d IFMATCH, --descr=IFMATCH
+-a IFMATCH, --alias=IFMATCH
+  Set the interface name to match against the ifDescr or ifAlias value.
+  This is a perl regular expression and can match multiple interfaces.
+  There must be at least one -d or one -a option.
+__USAGE__
+}
+
+sub verbose
+{
+  my ($format) = shift;
+  my (@args) = @_;
+
+  if (defined($opt_verbose)) {
+    printf "INFO: $format", @args;
+  }
+}
+
+sub get_state_filename
+{
+  my ($ifname) = shift;
+
+  # Sanitize host and interface name.
+  my $hostname = $opt_hostname;
+  $hostname =~ s/[^A-Za-z0-9\-\.]//g;
+  $ifname =~ s/[^A-Za-z0-9\-\.]//g;
+
+  return sprintf("%s/%s/%s.state",
+                 $opt_statedir,
+                 $hostname,
+                 $ifname);
+}
+
+sub load_state
+{
+  my ($ifname) = shift;
+
+  # Sanitize host and interface name.
+  my $hostname = $opt_hostname;
+  $hostname =~ s/[^A-Za-z0-9\-\.]//g;
+  $ifname =~ s/[^A-Za-z0-9\-\.]//g;
+
+  if (open(STATE, "$opt_statedir/$hostname/$ifname.state")) {
+    my $time = <STATE>;
+    chomp $time;
+    
+    my $errors = <STATE>;
+    chomp $errors;
+
+    close(STATE);
+
+    return { time => $time,
+             errors => $errors };
+  }
+
+  return undef;
+}
+
+sub save_state
+{
+  my ($ifname) = shift;
+  my ($time) = shift;
+  my ($errors) = shift;
+
+  # Sanitize host and interface name.
+  my $hostname = $opt_hostname;
+  $hostname =~ s/[^A-Za-z0-9\-\.]//g;
+  $ifname =~ s/[^A-Za-z0-9\-\.]//g;
+
+  if (!-d $opt_statedir) {
+    mkdir $opt_statedir;
+  }
+  if (!-d "$opt_statedir/$hostname") {
+    mkdir "$opt_statedir/$hostname";
+  }
+  if (open(STATE, "> $opt_statedir/$hostname/$ifname.state")) {
+    print STATE $time."\n";
+    print STATE $errors."\n";
+
+    close(STATE);
+  }
+}
