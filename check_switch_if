@@ -343,7 +343,7 @@ Options:
 
 -D DIRECTORY
   Directory where the last known error counters are stored.
-  Defaults to /var/run/check_switch_if/
+  Defaults to /var/run/nagios3/check_switch_if/
 
 -d IFMATCH, --descr=IFMATCH
 -a IFMATCH, --alias=IFMATCH
