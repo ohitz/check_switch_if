@@ -14,6 +14,7 @@
 use strict;
 use Net::SNMP;
 use Getopt::Long;
+use Scalar::Util qw(looks_like_number);
 
 # Directory where the values of the previous run are stored.
 my $opt_statedir = "/var/run/check_switch_if";
@@ -201,7 +202,7 @@ foreach my $if_index (@if_indexes) {
 
   # Interface errors.
   foreach $oid (values %{ $ERROR_OIDS }) {
-    if (defined $values->{$oid.".".$if_index}) {
+    if (defined $values->{$oid.".".$if_index} && looks_like_number($values->{$oid.".".$if_index})) {
       if (!defined $if_state->{$if_index}->{errors}) {
         $if_state->{$if_index}->{errors} = 0;
       }
